@@ -41,3 +41,20 @@ example
 # generated native folders
 /ios
 /android
+
+
+# Python backend
+backend/venv/
+__pycache__/
+*.py[cod]
+
+# Local database
+backend/roadguard.db
+
+# YOLO generated output
+runs/
+
+# Environment variables
+.env
+.env.*
+!.env.example
