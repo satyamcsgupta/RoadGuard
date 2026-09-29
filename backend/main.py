@@ -1,10 +1,13 @@
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
+from jose import jwt
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import shutil
 import os
 
@@ -13,12 +16,38 @@ from models import User
 
 app = FastAPI()
 password_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+JWT_ALGORITHM = "HS256"
+
+
+def load_jwt_secret():
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        env_path = Path(__file__).resolve().with_name(".env")
+        if env_path.is_file():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == "JWT_SECRET":
+                    secret = value.strip().strip("\"'")
+                    break
+        if secret:
+            os.environ.setdefault("JWT_SECRET", secret)
+    if not secret:
+        raise RuntimeError("JWT_SECRET must be set in the environment or backend/.env")
+    return secret
+
+
+JWT_SECRET = load_jwt_secret()
 
 
 class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1)
     email: str = Field(..., min_length=1)
     password: str = Field(..., min_length=8)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
 
 
 # ==============================
@@ -81,6 +110,41 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
 
     return {
         "message": "Registration successful",
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+        },
+    }
+
+
+@app.post("/login")
+def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    user = db.scalar(select(User).where(User.email == email))
+
+    if user is None or not password_context.verify(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=60),
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
         "user": {
             "id": user.id,
             "name": user.name,
