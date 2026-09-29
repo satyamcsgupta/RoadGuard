@@ -1,4 +1,5 @@
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 from jose import jwt
@@ -15,6 +16,13 @@ from database import get_db
 from models import User
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 password_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 JWT_ALGORITHM = "HS256"
 
