@@ -1,19 +1,21 @@
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
-from jose import jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import logging
 import shutil
 import os
 
 from database import get_db
-from models import User
+from models import Report, User
 
 app = FastAPI()
 app.add_middleware(
@@ -45,6 +47,45 @@ def load_jwt_secret():
 
 
 JWT_SECRET = load_jwt_secret()
+bearer_scheme = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing authentication token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        logger.warning("JWT authentication failed: bearer credentials missing")
+        raise unauthorized
+
+    try:
+        claims = jwt.decode(
+            credentials.credentials,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+        )
+        user_id = int(claims.get("user_id", claims.get("sub")))
+    except ExpiredSignatureError:
+        logger.warning("JWT verification failed: token expired")
+        raise unauthorized
+    except JWTError as error:
+        logger.warning("JWT verification failed: %s", type(error).__name__)
+        raise unauthorized
+    except (TypeError, ValueError):
+        logger.warning("JWT verification failed: invalid user identifier")
+        raise unauthorized
+
+    user = db.get(User, user_id)
+    if user is None:
+        logger.warning("JWT verified but corresponding user was not found")
+        raise unauthorized
+    return user
 
 
 class RegisterRequest(BaseModel):
@@ -162,6 +203,93 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
     }
 
 
+def serialize_report(report: Report) -> dict:
+    return {
+        "id": report.id,
+        "user_id": report.user_id,
+        "image_filename": report.image_filename,
+        "latitude": report.latitude,
+        "longitude": report.longitude,
+        "pothole_count": report.pothole_count,
+        "status": report.status,
+        "created_at": report.created_at.isoformat(),
+    }
+
+
+@app.post("/reports", status_code=status.HTTP_201_CREATED)
+def create_report(
+    image_filename: str = Form(...),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    pothole_count: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if pothole_count <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot create a report without a detected pothole.",
+        )
+
+    filename = Path(image_filename.strip()).name
+    if not filename:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Image filename must not be empty",
+        )
+
+    report = Report(
+        user_id=current_user.id,
+        image_filename=filename,
+        latitude=latitude,
+        longitude=longitude,
+        pothole_count=pothole_count,
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return {
+        "message": "Report created successfully",
+        "report": serialize_report(report),
+    }
+
+
+@app.get("/reports")
+def get_user_reports(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    reports = db.scalars(
+        select(Report)
+        .where(Report.user_id == current_user.id)
+        .order_by(Report.created_at.desc(), Report.id.desc())
+    ).all()
+    return [serialize_report(report) for report in reports]
+
+
+@app.delete("/reports/{report_id}")
+def delete_report(
+    report_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    report = db.get(Report, report_id)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+    if current_user.id != report.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this report",
+        )
+
+    db.delete(report)
+    db.commit()
+    return {"message": "Report deleted successfully"}
+
+
 # ==============================
 # Analyze road image
 # ==============================
@@ -169,8 +297,8 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
 @app.post("/analyze")
 async def analyze_image(
     file: UploadFile = File(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...)
+    latitude: float | None = Form(None),
+    longitude: float | None = Form(None)
 ):
 
     # Temporary file path
@@ -220,10 +348,11 @@ async def analyze_image(
             "filename": file.filename,
             "potholes_detected": len(detections),
             "detections": detections,
-            "location": {
-                "latitude": latitude,
-                "longitude": longitude
-            }
+            "location": (
+                {"latitude": latitude, "longitude": longitude}
+                if latitude is not None and longitude is not None
+                else None
+            )
         }
 
     finally:

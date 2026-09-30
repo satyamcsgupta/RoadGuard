@@ -1,5 +1,5 @@
 from database import Base, engine
-from models import User  # noqa: F401 - ensures SQLAlchemy registers the model
+from models import Report, User  # noqa: F401 - register all database models
 
 
 Base.metadata.create_all(bind=engine)

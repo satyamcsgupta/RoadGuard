@@ -1,0 +1,8 @@
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32
+ultralytics==8.4.164
+SQLAlchemy==2.1.1
+passlib==1.7.4
+bcrypt==5.0.0
+python-jose==3.5.0

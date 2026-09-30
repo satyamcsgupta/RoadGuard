@@ -9,6 +9,7 @@ import { useRef, useState } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
+  ActivityIndicator,
   Alert,
   Button,
   Image,
@@ -31,6 +32,17 @@ type Detection = {
   };
 };
 
+type Coordinates = {
+  latitude: number;
+  longitude: number;
+};
+
+type SelectedPhoto = {
+  uri: string;
+  source: "camera" | "gallery";
+  location: Coordinates | null;
+};
+
 type AnalysisResult = {
   success: boolean;
   filename: string;
@@ -42,6 +54,51 @@ type AnalysisResult = {
   };
 };
 
+const parseExifCoordinate = (value: unknown): number | null => {
+  const parsePart = (part: unknown): number | null => {
+    if (typeof part === "number") return part;
+    if (typeof part === "string") {
+      const [numerator, denominator] = part.split("/").map(Number);
+      if (!Number.isFinite(numerator)) return null;
+      return denominator ? numerator / denominator : numerator;
+    }
+    if (typeof part === "object" && part !== null && "numerator" in part && "denominator" in part) {
+      const rational = part as { numerator: number; denominator: number };
+      return rational.denominator ? rational.numerator / rational.denominator : null;
+    }
+    return null;
+  };
+
+  const parts = Array.isArray(value)
+    ? value
+    : typeof value === "string" && value.includes(",")
+      ? value.split(",").map((part) => part.trim())
+      : [value];
+  const numbers = parts.map(parsePart);
+  if (numbers.some((part) => part === null)) return null;
+
+  const [degrees = 0, minutes = 0, seconds = 0] = numbers as number[];
+  return Math.abs(degrees) + minutes / 60 + seconds / 3600;
+};
+
+const getPhotoCoordinates = (exif: ImagePicker.ImagePickerAsset["exif"]): Coordinates | null => {
+  if (!exif) return null;
+
+  const latitude = parseExifCoordinate(exif.GPSLatitude);
+  const longitude = parseExifCoordinate(exif.GPSLongitude);
+  if (latitude === null || longitude === null) return null;
+
+  const signedLatitude = /S/i.test(String(exif.GPSLatitudeRef ?? ""))
+    ? -latitude
+    : latitude;
+  const signedLongitude = /W/i.test(String(exif.GPSLongitudeRef ?? ""))
+    ? -longitude
+    : longitude;
+
+  if (Math.abs(signedLatitude) > 90 || Math.abs(signedLongitude) > 180) return null;
+  return { latitude: signedLatitude, longitude: signedLongitude };
+};
+
 export default function CameraScreen() {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] =
@@ -50,8 +107,12 @@ export default function CameraScreen() {
   const [camera, setCamera] =
     useState<CameraView | null>(null);
 
-  const [photoUri, setPhotoUri] =
-    useState<string | null>(null);
+  const [selectedPhoto, setSelectedPhoto] =
+    useState<SelectedPhoto | null>(null);
+  const photoUri = selectedPhoto?.uri ?? null;
+  const location = selectedPhoto?.location ?? null;
+  const [isSelectingLocation, setIsSelectingLocation] = useState(false);
+  const [isLocationPromptDismissed, setIsLocationPromptDismissed] = useState(false);
 
   const [isUploading, setIsUploading] =
     useState(false);
@@ -68,15 +129,15 @@ export default function CameraScreen() {
   const returnToCamera = () => {
     setResult(null);
     setReportSaveStatus(null);
-    setPhotoUri(null);
-    setLocation(null);
+    setSelectedPhoto(null);
+    setIsLocationPromptDismissed(false);
     setImageSize(null);
-    router.replace("/camera");
+    router.replace("/(tabs)/camera");
   };
 
   const saveReport = async (
     analysis: AnalysisResult,
-    reportLocation: { latitude: number; longitude: number } | undefined,
+    reportLocation: Coordinates | null,
     imageUri: string
   ) => {
     if (reportSubmissionStarted.current) return;
@@ -144,11 +205,6 @@ export default function CameraScreen() {
     }
   };
 
-  const [location, setLocation] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
-
   const [imageSize, setImageSize] =
     useState<{ width: number; height: number } | null>(null);
 
@@ -168,7 +224,7 @@ export default function CameraScreen() {
     );
   };
 
-  const getCurrentLocation = async () => {
+  const getCurrentLocation = async (purpose: "camera" | "gallery") => {
     console.time("GPS");
 
     try {
@@ -177,10 +233,11 @@ export default function CameraScreen() {
 
       if (status !== "granted") {
         Alert.alert(
-          "Location Access Needed",
-          "RoadGuard needs location access to attach the pothole's location to the road report."
+          "Location Required",
+          purpose === "camera"
+            ? "RoadGuard needs location access to associate this photo with where it was taken. No later location will be used."
+            : "You chose to use your current location for this gallery photo. Location permission is required."
         );
-        setLocation(null);
         return null;
       }
 
@@ -194,7 +251,6 @@ export default function CameraScreen() {
         longitude: currentLocation.coords.longitude,
       };
 
-      setLocation(nextLocation);
       console.log(
         "GPS acquisition time:",
         currentLocation.timestamp
@@ -206,21 +262,37 @@ export default function CameraScreen() {
         "Location Error",
         "Unable to get your location. Please make sure location services are enabled."
       );
-      setLocation(null);
       return null;
     } finally {
       console.timeEnd("GPS");
     }
   };
 
-  const preparePhoto = async (uri: string) => {
-    setPhotoUri(uri);
+  const preparePhoto = (
+    uri: string,
+    source: SelectedPhoto["source"],
+    photoLocation: Coordinates | null
+  ) => {
+    setSelectedPhoto({ uri, source, location: photoLocation });
     setResult(null);
-    setLocation(null);
+    setReportSaveStatus(null);
+    setIsLocationPromptDismissed(false);
     setImageSize(null);
     loadImageSize(uri);
+  };
 
-    void getCurrentLocation();
+  const chooseGalleryCurrentLocation = async () => {
+    setIsSelectingLocation(true);
+    try {
+      const currentLocation = await getCurrentLocation("gallery");
+      if (!currentLocation) return;
+
+      setSelectedPhoto((photo) =>
+        photo ? { ...photo, location: currentLocation } : photo
+      );
+    } finally {
+      setIsSelectingLocation(false);
+    }
   };
 
   // =====================================
@@ -246,6 +318,7 @@ export default function CameraScreen() {
           mediaTypes: ["images"],
           allowsEditing: false,
           quality: 1,
+          exif: true,
         });
 
       if (!selected.canceled) {
@@ -256,7 +329,7 @@ export default function CameraScreen() {
           uri
         );
 
-        await preparePhoto(uri);
+        preparePhoto(uri, "gallery", getPhotoCoordinates(selected.assets[0].exif));
       }
     } catch (error) {
       console.log(
@@ -296,6 +369,63 @@ export default function CameraScreen() {
           onPress={requestPermission}
         />
 
+      </View>
+    );
+  }
+
+  if (
+    selectedPhoto?.source === "gallery" &&
+    !selectedPhoto.location &&
+    !isLocationPromptDismissed
+  ) {
+    return (
+      <View
+        style={[
+          styles.locationSelectionContainer,
+          {
+            paddingTop: insets.top + 16,
+            paddingBottom: insets.bottom + 16,
+          },
+        ]}
+      >
+        <Image
+          source={{ uri: selectedPhoto.uri }}
+          style={styles.locationSelectionImage}
+        />
+        <Text style={styles.locationChoiceTitle}>Where was this photo taken?</Text>
+        <Text style={styles.locationChoiceDescription}>
+          Add your current location, or continue without attaching a location.
+        </Text>
+        <TouchableOpacity
+          accessibilityRole="button"
+          disabled={isSelectingLocation}
+          style={styles.locationActionButton}
+          onPress={() => void chooseGalleryCurrentLocation()}
+        >
+          {isSelectingLocation ? (
+            <ActivityIndicator color="#FFFFFF" />
+          ) : (
+            <Text style={styles.locationActionText}>Use Current Location</Text>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity
+          accessibilityRole="button"
+          style={styles.chooseAnotherButton}
+          onPress={() => setIsLocationPromptDismissed(true)}
+        >
+          <Text style={styles.chooseAnotherText}>Analyze without location</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          accessibilityRole="button"
+          style={styles.chooseAnotherButton}
+          onPress={() => {
+            setSelectedPhoto(null);
+            setImageSize(null);
+            void pickImage();
+          }}
+        >
+          <Text style={styles.chooseAnotherText}>Choose another photo</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -417,20 +547,16 @@ export default function CameraScreen() {
                     : "A pothole was detected in this image."}
                 </Text>
 
-                {(result.location || location) && (
+                {location && (
                   <View style={styles.locationCard}>
                     <Text style={styles.locationTitle}>
                       📍 Detection Location
                     </Text>
                     <Text style={styles.locationText}>
-                      Latitude: {(
-                        result.location?.latitude ?? location?.latitude ?? 0
-                      ).toFixed(6)}
+                      Latitude: {location.latitude.toFixed(6)}
                     </Text>
                     <Text style={styles.locationText}>
-                      Longitude: {(
-                        result.location?.longitude ?? location?.longitude ?? 0
-                      ).toFixed(6)}
+                      Longitude: {location.longitude.toFixed(6)}
                     </Text>
                   </View>
                 )}
@@ -445,20 +571,16 @@ export default function CameraScreen() {
                   No pothole detected. This image was not reported.
                 </Text>
 
-                {(result.location || location) && (
+                {location && (
                   <View style={styles.locationCard}>
                     <Text style={styles.locationTitle}>
                       📍 Detection Location
                     </Text>
                     <Text style={styles.locationText}>
-                      Latitude: {(
-                        result.location?.latitude ?? location?.latitude ?? 0
-                      ).toFixed(6)}
+                      Latitude: {location.latitude.toFixed(6)}
                     </Text>
                     <Text style={styles.locationText}>
-                      Longitude: {(
-                        result.location?.longitude ?? location?.longitude ?? 0
-                      ).toFixed(6)}
+                      Longitude: {location.longitude.toFixed(6)}
                     </Text>
                   </View>
                 )}
@@ -488,8 +610,7 @@ export default function CameraScreen() {
                 onPress={() => {
                   setResult(null);
                   setReportSaveStatus(null);
-                  setPhotoUri(null);
-                  setLocation(null);
+                  setSelectedPhoto(null);
                   setImageSize(null);
                 }}
               >
@@ -504,8 +625,7 @@ export default function CameraScreen() {
                 style={styles.galleryResultButton}
                 onPress={() => {
                   setResult(null);
-                  setPhotoUri(null);
-                  setLocation(null);
+                  setSelectedPhoto(null);
                   setImageSize(null);
 
                   setTimeout(() => {
@@ -546,8 +666,7 @@ export default function CameraScreen() {
           <TouchableOpacity
             style={styles.retakeButton}
             onPress={() => {
-              setPhotoUri(null);
-              setLocation(null);
+              setSelectedPhoto(null);
               setImageSize(null);
             }}
             disabled={isUploading}
@@ -567,6 +686,8 @@ export default function CameraScreen() {
             ]}
             disabled={isUploading}
             onPress={async () => {
+                const photoForAnalysis = selectedPhoto;
+                if (!photoForAnalysis) return;
                 if (analysisInProgress.current) return;
                 analysisInProgress.current = true;
 
@@ -582,16 +703,12 @@ export default function CameraScreen() {
 
                 console.time("AI_UPLOAD");
 
-                const currentLocation =
-                  location ??
-                  (await getCurrentLocation());
-
                 console.log(
                   "📁 Creating File object..."
                 );
 
                 const file =
-                  new File(photoUri);
+                  new File(photoForAnalysis.uri);
 
                 console.log(
                   "📄 File URI:",
@@ -616,15 +733,14 @@ export default function CameraScreen() {
 
                 formData.append("file", file);
 
-                if (currentLocation) {
+                if (photoForAnalysis.location) {
                   formData.append(
                     "latitude",
-                    String(currentLocation.latitude)
+                    String(photoForAnalysis.location.latitude)
                   );
-
                   formData.append(
                     "longitude",
-                    String(currentLocation.longitude)
+                    String(photoForAnalysis.location.longitude)
                   );
                 }
 
@@ -659,22 +775,29 @@ export default function CameraScreen() {
                 setResult(data);
                 if (data.potholes_detected > 0) {
                   requestAnimationFrame(() => {
-                    Alert.alert(
-                      "Report this pothole?",
-                      "A pothole was detected in this image. Do you want to submit it as a road-condition report?",
-                      [
-                        { text: "Cancel", style: "cancel" },
-                        {
-                          text: "Report",
-                          onPress: () =>
-                            void saveReport(
-                              data,
-                              currentLocation ?? data.location,
-                              photoUri
-                            ),
-                        },
-                      ]
-                    );
+                    if (photoForAnalysis.location) {
+                      Alert.alert(
+                        "Report this pothole?",
+                        "A pothole was detected in this image. Do you want to submit it as a road-condition report?",
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          {
+                            text: "Report",
+                            onPress: () =>
+                              void saveReport(
+                                data,
+                                photoForAnalysis.location,
+                                photoForAnalysis.uri
+                              ),
+                          },
+                        ]
+                      );
+                    } else {
+                      Alert.alert(
+                        "Location Required",
+                        "AI analysis is complete, but a pothole report cannot be submitted without a location."
+                      );
+                    }
                   });
                 }
 
@@ -786,7 +909,10 @@ export default function CameraScreen() {
                   photo.uri
                 );
 
-                await preparePhoto(photo.uri);
+                const capturedLocation = await getCurrentLocation("camera");
+                if (capturedLocation) {
+                  preparePhoto(photo.uri, "camera", capturedLocation);
+                }
               }
 
             } catch (error) {
@@ -814,6 +940,69 @@ export default function CameraScreen() {
 // =====================================
 
 const styles = StyleSheet.create({
+
+  locationChoiceTitle: {
+    color: "#1A1A1A",
+    fontSize: 21,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+
+  locationChoiceDescription: {
+    marginTop: 8,
+    color: "#6B7280",
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "center",
+  },
+
+  locationActionButton: {
+    width: "100%",
+    minHeight: 52,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 22,
+    paddingHorizontal: 18,
+    borderRadius: 12,
+    backgroundColor: "#1B5E3B",
+  },
+
+  locationActionText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+
+  locationSelectionContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 22,
+    backgroundColor: "#F6F5F2",
+  },
+
+  locationSelectionImage: {
+    width: "100%",
+    height: 260,
+    marginBottom: 26,
+    borderRadius: 15,
+    backgroundColor: "#E8E9EB",
+    resizeMode: "contain",
+  },
+
+  chooseAnotherButton: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginTop: 8,
+    paddingHorizontal: 14,
+  },
+
+  chooseAnotherText: {
+    color: "#6B7280",
+    fontSize: 14,
+    fontWeight: "600",
+  },
 
   container: {
     flex: 1,
