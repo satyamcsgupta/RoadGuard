@@ -1,6 +1,8 @@
-from database import Base, engine
+from database import (
+    initialize_database,
+)
 from models import Report, User  # noqa: F401 - register all database models
 
 
-Base.metadata.create_all(bind=engine)
+initialize_database()
 print("Database tables created successfully.")

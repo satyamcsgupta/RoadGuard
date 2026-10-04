@@ -58,3 +58,10 @@ runs/
 .env
 .env.*
 !.env.example
+*.secret
+*.secrets
+secrets.*
+**/secrets/**
+
+# Runtime uploaded report images
+backend/uploads/

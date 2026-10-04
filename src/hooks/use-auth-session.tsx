@@ -1,5 +1,13 @@
 import * as SecureStore from "expo-secure-store";
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+import { API_ENDPOINTS, authorizationHeader } from "@/lib/api";
 
 export type UserProfile = {
   id: number;
@@ -30,7 +38,14 @@ export function AuthSessionProvider({ children }: { children: ReactNode }) {
           SecureStore.getItemAsync("roadguard_access_token"),
           SecureStore.getItemAsync("roadguard_user"),
         ]);
-        if (!isActive || !token || !storedUser) return;
+        if (!isActive) return;
+        if (!token || !storedUser) {
+          await Promise.all([
+            SecureStore.deleteItemAsync("roadguard_access_token"),
+            SecureStore.deleteItemAsync("roadguard_user"),
+          ]);
+          return;
+        }
 
         const parsed: unknown = JSON.parse(storedUser);
         if (
@@ -38,20 +53,55 @@ export function AuthSessionProvider({ children }: { children: ReactNode }) {
           parsed !== null &&
           "id" in parsed &&
           typeof parsed.id === "number" &&
+          Number.isSafeInteger(parsed.id) &&
+          parsed.id > 0 &&
           "name" in parsed &&
           typeof parsed.name === "string" &&
           "email" in parsed &&
-          typeof parsed.email === "string"
+          typeof parsed.email === "string" &&
+          "role" in parsed &&
+          (parsed.role === "user" || parsed.role === "admin")
         ) {
-          setUser({
+          const restoredUser: UserProfile = {
             id: parsed.id,
             name: parsed.name,
             email: parsed.email,
-            role: "role" in parsed && typeof parsed.role === "string" ? parsed.role : undefined,
-          });
+            role: parsed.role,
+          };
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          try {
+            const response = await fetch(API_ENDPOINTS.reports, {
+              headers: authorizationHeader(token),
+              signal: controller.signal,
+            });
+            if (response.status === 401 || response.status === 403) {
+              await Promise.all([
+                SecureStore.deleteItemAsync("roadguard_access_token"),
+                SecureStore.deleteItemAsync("roadguard_user"),
+              ]);
+              return;
+            }
+          } catch {
+            // Keep a cached session during temporary network outages.
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (isActive) setUser(restoredUser);
+        } else {
+          await Promise.all([
+            SecureStore.deleteItemAsync("roadguard_access_token"),
+            SecureStore.deleteItemAsync("roadguard_user"),
+          ]);
         }
       } catch {
-        if (isActive) setUser(null);
+        if (isActive) {
+          setUser(null);
+          await Promise.all([
+            SecureStore.deleteItemAsync("roadguard_access_token"),
+            SecureStore.deleteItemAsync("roadguard_user"),
+          ]);
+        }
       } finally {
         if (isActive) setIsLoading(false);
       }
@@ -63,15 +113,22 @@ export function AuthSessionProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const setAuthenticatedUser = (nextUser: UserProfile) => setUser(nextUser);
+  const setAuthenticatedUser = useCallback(
+    (nextUser: UserProfile) => setUser(nextUser),
+    [],
+  );
 
-  const clearSession = async () => {
-    await Promise.all([
+  const clearSession = useCallback(async () => {
+    setUser(null);
+    const results = await Promise.allSettled([
       SecureStore.deleteItemAsync("roadguard_access_token"),
       SecureStore.deleteItemAsync("roadguard_user"),
     ]);
-    setUser(null);
-  };
+    const failedDeletion = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    );
+    if (failedDeletion) throw failedDeletion.reason;
+  }, []);
 
   return (
     <AuthSessionContext.Provider

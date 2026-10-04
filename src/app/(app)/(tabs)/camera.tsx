@@ -5,7 +5,14 @@ import { File } from "expo-file-system";
 import { fetch } from "expo/fetch";
 import * as Location from "expo-location";
 import * as SecureStore from "expo-secure-store";
-import { useRef, useState } from "react";
+import {
+  API_ENDPOINTS,
+  authorizationHeader,
+  readJsonResponse,
+} from "@/lib/api";
+import { UserProfileAvatar } from "@/components/user-profile-avatar";
+import { useAuthSession } from "@/hooks/use-auth-session";
+import { useEffect, useRef, useState } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
@@ -13,9 +20,11 @@ import {
   Alert,
   Button,
   Image,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -99,7 +108,14 @@ const getPhotoCoordinates = (exif: ImagePicker.ImagePickerAsset["exif"]): Coordi
   return { latitude: signedLatitude, longitude: signedLongitude };
 };
 
+type ReportDraft = {
+  analysis: AnalysisResult;
+  location: Coordinates;
+  imageUri: string;
+};
+
 export default function CameraScreen() {
+  const { clearSession } = useAuthSession();
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] =
     useCameraPermissions();
@@ -122,26 +138,35 @@ export default function CameraScreen() {
 
   const [reportSaveStatus, setReportSaveStatus] =
     useState<"saved" | "failed" | null>(null);
+  const [reportDraft, setReportDraft] = useState<ReportDraft | null>(null);
+  const [reportDescription, setReportDescription] = useState("");
+  const [isSavingReport, setIsSavingReport] = useState(false);
 
   const analysisInProgress = useRef(false);
   const reportSubmissionStarted = useRef(false);
+  const galleryFlowStartedAt = useRef<number | null>(null);
+  const resultTransitionStartedAt = useRef<number | null>(null);
 
   const returnToCamera = () => {
+    galleryFlowStartedAt.current = null;
+    resultTransitionStartedAt.current = null;
     setResult(null);
     setReportSaveStatus(null);
     setSelectedPhoto(null);
     setIsLocationPromptDismissed(false);
     setImageSize(null);
-    router.replace("/(tabs)/camera");
+    router.replace("/(app)/(tabs)/camera");
   };
 
   const saveReport = async (
     analysis: AnalysisResult,
     reportLocation: Coordinates | null,
-    imageUri: string
+    imageUri: string,
+    description: string
   ) => {
-    if (reportSubmissionStarted.current) return;
+    if (reportSubmissionStarted.current || !reportLocation) return;
     reportSubmissionStarted.current = true;
+    setIsSavingReport(true);
 
     try {
       const token = await SecureStore.getItemAsync("roadguard_access_token");
@@ -151,18 +176,22 @@ export default function CameraScreen() {
         "length:",
         token?.length ?? 0
       );
-      if (!token || !reportLocation) {
-        throw new Error("Authentication token or scan location unavailable");
+      if (!token) {
+        await clearSession();
+        throw new Error("Authentication token unavailable");
       }
 
       const reportFormData = new FormData();
+      const reportImage = new File(imageUri);
       reportFormData.append(
         "image_filename",
-        analysis.filename || imageUri.split("/").pop() || "road-scan"
+        reportImage.name || analysis.filename || imageUri.split("/").pop() || "road-scan"
       );
+      reportFormData.append("file", reportImage);
       reportFormData.append("latitude", String(reportLocation.latitude));
       reportFormData.append("longitude", String(reportLocation.longitude));
       reportFormData.append("pothole_count", String(analysis.potholes_detected));
+      reportFormData.append("description", description.trim());
 
       const authorization = `Bearer ${token}`;
       console.log(
@@ -170,38 +199,27 @@ export default function CameraScreen() {
         Boolean(authorization)
       );
       const reportResponse = await fetch(
-        "http://10.41.228.118:8000/reports",
+        API_ENDPOINTS.reports,
         {
           method: "POST",
-          headers: { Authorization: authorization },
+          headers: authorizationHeader(token),
           body: reportFormData,
         }
       );
-
-      if (!reportResponse.ok) {
-        console.warn("REPORT API status:", reportResponse.status);
-        if (reportResponse.status === 401) {
-          try {
-            const errorBody: unknown = await reportResponse.json();
-            if (
-              typeof errorBody === "object" &&
-              errorBody !== null &&
-              "detail" in errorBody &&
-              typeof errorBody.detail === "string"
-            ) {
-              console.warn("REPORT API 401 detail:", errorBody.detail);
-            }
-          } catch {
-            console.warn("REPORT API 401 detail unavailable");
-          }
-        }
-        throw new Error("Report request failed");
+      if (reportResponse.status === 401 || reportResponse.status === 403) {
+        await clearSession();
+        return;
       }
+      await readJsonResponse<unknown>(reportResponse);
 
       setReportSaveStatus("saved");
+      setReportDraft(null);
     } catch (reportError) {
       console.log("❌ Report save error:", reportError);
       setReportSaveStatus("failed");
+      reportSubmissionStarted.current = false;
+    } finally {
+      setIsSavingReport(false);
     }
   };
 
@@ -211,20 +229,26 @@ export default function CameraScreen() {
   const [containerSize, setContainerSize] =
     useState({ width: 0, height: 0 });
 
-  const loadImageSize = (uri: string) => {
+  const loadImageSize = (uri: string, onComplete?: () => void) => {
     Image.getSize(
       uri,
       (width, height) => {
         setImageSize({ width, height });
+        onComplete?.();
       },
       (error) => {
         console.log("❌ Image size error:", error);
         setImageSize(null);
+        onComplete?.();
       }
     );
   };
 
   const getCurrentLocation = async (purpose: "camera" | "gallery") => {
+    const locationStartedAt = Date.now();
+    if (purpose === "gallery") {
+      console.log("[PERF] Location request started", new Date(locationStartedAt).toISOString());
+    }
     console.time("GPS");
 
     try {
@@ -265,6 +289,11 @@ export default function CameraScreen() {
       return null;
     } finally {
       console.timeEnd("GPS");
+      if (purpose === "gallery") {
+        console.log(
+          `[PERF] Location request finished: ${Date.now() - locationStartedAt} ms`
+        );
+      }
     }
   };
 
@@ -273,15 +302,37 @@ export default function CameraScreen() {
     source: SelectedPhoto["source"],
     photoLocation: Coordinates | null
   ) => {
+    const imagePreparationStartedAt = Date.now();
+    const measurePreparation = source === "gallery";
+    if (measurePreparation) {
+      console.log(
+        "[PERF] Image preparation started",
+        new Date(imagePreparationStartedAt).toISOString()
+      );
+      galleryFlowStartedAt.current = null;
+      resultTransitionStartedAt.current = null;
+    }
     setSelectedPhoto({ uri, source, location: photoLocation });
     setResult(null);
     setReportSaveStatus(null);
     setIsLocationPromptDismissed(false);
     setImageSize(null);
-    loadImageSize(uri);
+    loadImageSize(uri, () => {
+      if (measurePreparation) {
+        console.log(
+          `[PERF] Image preparation finished: ${Date.now() - imagePreparationStartedAt} ms`
+        );
+      }
+    });
   };
 
   const chooseGalleryCurrentLocation = async () => {
+    const flowStartedAt = Date.now();
+    galleryFlowStartedAt.current = flowStartedAt;
+    console.log(
+      "[PERF] User tapped Choose Current Location",
+      new Date(flowStartedAt).toISOString()
+    );
     setIsSelectingLocation(true);
     try {
       const currentLocation = await getCurrentLocation("gallery");
@@ -294,6 +345,25 @@ export default function CameraScreen() {
       setIsSelectingLocation(false);
     }
   };
+
+  useEffect(() => {
+    if (!result || resultTransitionStartedAt.current === null) return;
+
+    console.log(
+      `[PERF] Analysis result displayed: ${Date.now() - resultTransitionStartedAt.current} ms after transition started`
+    );
+    console.log(
+      "[PERF] Result/navigation to analysis result completed",
+      new Date().toISOString()
+    );
+    if (galleryFlowStartedAt.current !== null) {
+      console.log(
+        `[PERF] Total flow: ${Date.now() - galleryFlowStartedAt.current} ms`
+      );
+    }
+    resultTransitionStartedAt.current = null;
+    galleryFlowStartedAt.current = null;
+  }, [result]);
 
   // =====================================
   // PICK IMAGE FROM GALLERY
@@ -388,6 +458,9 @@ export default function CameraScreen() {
           },
         ]}
       >
+        <View style={[styles.avatarPosition, { top: insets.top + 12 }]}>
+          <UserProfileAvatar overCamera />
+        </View>
         <Image
           source={{ uri: selectedPhoto.uri }}
           style={styles.locationSelectionImage}
@@ -437,6 +510,9 @@ export default function CameraScreen() {
   if (result && photoUri) {
     return (
       <View style={styles.resultContainer}>
+        <View style={[styles.avatarPosition, { top: insets.top + 8 }]}>
+          <UserProfileAvatar overCamera />
+        </View>
         <TouchableOpacity
           accessibilityRole="button"
           accessibilityLabel="Back to camera"
@@ -527,31 +603,22 @@ export default function CameraScreen() {
 
             {result.potholes_detected > 0 ? (
               <>
-                <Text style={styles.resultTitle}>
-                  {result.potholes_detected > 1
-                    ? "🚧 Potholes Detected"
-                    : "🚧 Pothole Detected"}
-                </Text>
-
-                <Text style={styles.resultCount}>
-                  {result.potholes_detected} pothole
-                  {result.potholes_detected > 1
-                    ? "s"
-                    : ""}{" "}
-                  detected
-                </Text>
-
-                <Text style={styles.infoText}>
-                  {result.potholes_detected > 1
-                    ? "Multiple potholes were detected in this image."
-                    : "A pothole was detected in this image."}
-                </Text>
+                <View style={styles.resultSummaryCard}>
+                  <View style={styles.resultStatusIcon}>
+                    <Text style={styles.resultStatusIconText}>!</Text>
+                  </View>
+                  <Text style={styles.resultTitle}>
+                    🚧 {result.potholes_detected}{" "}
+                    {result.potholes_detected === 1 ? "Pothole" : "Potholes"} Detected
+                  </Text>
+                  <Text style={styles.infoText}>
+                    Review the marked areas and submit a report to help improve road safety.
+                  </Text>
+                </View>
 
                 {location && (
                   <View style={styles.locationCard}>
-                    <Text style={styles.locationTitle}>
-                      📍 Detection Location
-                    </Text>
+                    <Text style={styles.locationTitle}>📍 Location captured</Text>
                     <Text style={styles.locationText}>
                       Latitude: {location.latitude.toFixed(6)}
                     </Text>
@@ -563,19 +630,17 @@ export default function CameraScreen() {
               </>
             ) : (
               <>
-                <Text style={styles.resultTitle}>
-                  ✅ No Detection
-                </Text>
-
-                <Text style={styles.infoText}>
-                  No pothole detected. This image was not reported.
-                </Text>
+                <View style={[styles.resultSummaryCard, styles.noDetectionCard]}>
+                  <Text style={styles.noDetectionIcon}>✓</Text>
+                  <Text style={styles.resultTitle}>No Pothole Detected</Text>
+                  <Text style={styles.infoText}>
+                    No pothole was detected in this image.
+                  </Text>
+                </View>
 
                 {location && (
                   <View style={styles.locationCard}>
-                    <Text style={styles.locationTitle}>
-                      📍 Detection Location
-                    </Text>
+                    <Text style={styles.locationTitle}>📍 Location captured</Text>
                     <Text style={styles.locationText}>
                       Latitude: {location.latitude.toFixed(6)}
                     </Text>
@@ -603,10 +668,33 @@ export default function CameraScreen() {
             )}
 
             <View style={styles.resultButtons}>
-              {/* SCAN WITH CAMERA */}
+              {result.potholes_detected > 0 ? (
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  style={styles.reportIssueButton}
+                  onPress={() => {
+                    const reportLocation = selectedPhoto?.location ?? result.location;
+                    if (!reportLocation) {
+                      Alert.alert(
+                        "Location Required",
+                        "A report cannot be submitted without a location."
+                      );
+                      return;
+                    }
+                    setReportDescription("");
+                    setReportDraft({
+                      analysis: result,
+                      location: reportLocation,
+                      imageUri: photoUri,
+                    });
+                  }}
+                >
+                  <Text style={styles.reportIssueButtonText}>Report Issue</Text>
+                </TouchableOpacity>
+              ) : null}
 
               <TouchableOpacity
-                style={styles.scanAgainButton}
+                style={styles.scanAnotherButton}
                 onPress={() => {
                   setResult(null);
                   setReportSaveStatus(null);
@@ -614,33 +702,103 @@ export default function CameraScreen() {
                   setImageSize(null);
                 }}
               >
-                <Text style={styles.scanAgainText}>
-                  📷 Scan with Camera
-                </Text>
+                <Text style={styles.scanAnotherButtonText}>Scan Another</Text>
               </TouchableOpacity>
 
-              {/* CHOOSE FROM GALLERY */}
-
               <TouchableOpacity
-                style={styles.galleryResultButton}
+                style={styles.chooseImageButton}
                 onPress={() => {
                   setResult(null);
                   setSelectedPhoto(null);
                   setImageSize(null);
-
-                  setTimeout(() => {
-                    pickImage();
-                  }, 100);
+                  setTimeout(() => pickImage(), 100);
                 }}
               >
-                <Text style={styles.galleryResultText}>
-                  🖼️ Choose from Gallery
-                </Text>
+                <Text style={styles.chooseImageButtonText}>Choose from Gallery</Text>
               </TouchableOpacity>
             </View>
 
           </View>
         </ScrollView>
+
+        <Modal
+          animationType="slide"
+          onRequestClose={() => {
+            if (!isSavingReport) setReportDraft(null);
+          }}
+          transparent
+          visible={Boolean(reportDraft)}
+        >
+          <View style={styles.reportModalOverlay}>
+            <ScrollView
+              contentContainerStyle={styles.reportModalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              style={styles.reportModalScroll}
+            >
+              {reportDraft ? (
+                <View style={styles.reportForm}>
+                  <Image
+                    accessibilityLabel="Report image preview"
+                    source={{ uri: reportDraft.imageUri }}
+                    style={styles.reportFormImage}
+                  />
+                  <Text style={styles.reportFormSummary}>
+                    {reportDraft.analysis.potholes_detected} pothole
+                    {reportDraft.analysis.potholes_detected === 1 ? "" : "s"} detected
+                  </Text>
+                  <Text style={styles.reportFormLocation}>
+                    Location: {reportDraft.location.latitude.toFixed(6)},{" "}
+                    {reportDraft.location.longitude.toFixed(6)}
+                  </Text>
+                  <Text style={styles.reportFormLabel}>Description (Optional)</Text>
+                  <TextInput
+                    accessibilityLabel="Description (Optional)"
+                    multiline
+                    onChangeText={setReportDescription}
+                    placeholder="Describe the road condition or any useful details..."
+                    placeholderTextColor="#71717A"
+                    style={styles.reportDescriptionInput}
+                    textAlignVertical="top"
+                    value={reportDescription}
+                  />
+                  {reportSaveStatus === "failed" ? (
+                    <Text style={styles.reportSaveFailure}>
+                      Report could not be saved. Please try again.
+                    </Text>
+                  ) : null}
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    disabled={isSavingReport}
+                    onPress={() =>
+                      void saveReport(
+                        reportDraft.analysis,
+                        reportDraft.location,
+                        reportDraft.imageUri,
+                        reportDescription
+                      )
+                    }
+                    style={[
+                      styles.submitReportButton,
+                      isSavingReport && styles.submitReportButtonDisabled,
+                    ]}
+                  >
+                    <Text style={styles.submitReportButtonText}>
+                      {isSavingReport ? "Submitting..." : "Submit Report"}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    disabled={isSavingReport}
+                    onPress={() => setReportDraft(null)}
+                    style={styles.cancelReportButton}
+                  >
+                    <Text style={styles.cancelReportButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </ScrollView>
+          </View>
+        </Modal>
 
       </View>
     );
@@ -659,7 +817,35 @@ export default function CameraScreen() {
           style={styles.preview}
         />
 
-        <View style={styles.previewControls}>
+        <View style={[styles.avatarPosition, { top: insets.top + 12 }]}>
+          <UserProfileAvatar overCamera />
+        </View>
+        <View
+          style={[
+            styles.previewHeader,
+            { top: insets.top + 12, right: 72 },
+          ]}
+        >
+          <Text style={styles.previewHeaderTitle}>Review your photo</Text>
+          <Text style={styles.previewHeaderSubtitle}>
+            Analyze this image to check for potholes.
+          </Text>
+        </View>
+
+        {isUploading ? (
+          <View pointerEvents="none" style={styles.analyzingOverlay}>
+            <ActivityIndicator color="#FFFFFF" size="large" />
+            <Text style={styles.analyzingTitle}>Analyzing road...</Text>
+            <Text style={styles.analyzingSubtitle}>Detecting potholes</Text>
+          </View>
+        ) : null}
+
+        <View
+          style={[
+            styles.previewControls,
+            { bottom: Math.max(insets.bottom, 8) + 10 },
+          ]}
+        >
 
           {/* RETAKE / CHOOSE ANOTHER */}
 
@@ -744,11 +930,25 @@ export default function CameraScreen() {
                   );
                 }
 
+                const token = await SecureStore.getItemAsync(
+                  "roadguard_access_token"
+                );
+                if (!token) {
+                  await clearSession();
+                  throw new Error("Please sign in again to analyze images.");
+                }
+
+                const analyzeStartedAt = Date.now();
+                console.log(
+                  "[PERF] Analyze request started",
+                  new Date(analyzeStartedAt).toISOString()
+                );
                 const response =
-                  await fetch(
-                    "http://10.41.228.118:8000/analyze",
+                  await globalThis.fetch(
+                    API_ENDPOINTS.analyze,
                     {
                       method: "POST",
+                      headers: authorizationHeader(token),
                       body: formData,
                     }
                   );
@@ -759,47 +959,22 @@ export default function CameraScreen() {
                 );
 
                 const data =
-                  await response.json();
+                  await readJsonResponse<AnalysisResult>(response);
+                console.log(
+                  `[PERF] Analyze request finished: ${Date.now() - analyzeStartedAt} ms`
+                );
 
                 console.log(
                   "🤖 AI RESULT:",
                   data
                 );
 
-                if (!response.ok) {
-                  throw new Error(
-                    "Server returned an error"
-                  );
-                }
-
+                resultTransitionStartedAt.current = Date.now();
+                console.log(
+                  "[PERF] Result/navigation to analysis result started",
+                  new Date(resultTransitionStartedAt.current).toISOString()
+                );
                 setResult(data);
-                if (data.potholes_detected > 0) {
-                  requestAnimationFrame(() => {
-                    if (photoForAnalysis.location) {
-                      Alert.alert(
-                        "Report this pothole?",
-                        "A pothole was detected in this image. Do you want to submit it as a road-condition report?",
-                        [
-                          { text: "Cancel", style: "cancel" },
-                          {
-                            text: "Report",
-                            onPress: () =>
-                              void saveReport(
-                                data,
-                                photoForAnalysis.location,
-                                photoForAnalysis.uri
-                              ),
-                          },
-                        ]
-                      );
-                    } else {
-                      Alert.alert(
-                        "Location Required",
-                        "AI analysis is complete, but a pothole report cannot be submitted without a location."
-                      );
-                    }
-                  });
-                }
 
               } catch (error) {
 
@@ -824,9 +999,7 @@ export default function CameraScreen() {
             }}
           >
             <Text style={styles.analyzeText}>
-              {isUploading
-                ? "⏳ Analyzing..."
-                : "🤖 Analyze Road"}
+              Analyze Road
             </Text>
           </TouchableOpacity>
 
@@ -851,37 +1024,46 @@ export default function CameraScreen() {
 
       {/* TOP TEXT */}
 
-      <View style={styles.cameraOverlay}>
-
+      <View
+        style={[
+          styles.cameraOverlay,
+          { top: insets.top + 8, right: 72 },
+        ]}
+      >
         <Text style={styles.cameraTitle}>
-          RoadGuard
+          Scan Road
         </Text>
-
         <Text style={styles.cameraSubtitle}>
-          Scan the road for potholes
+          Capture a road image to detect potholes.
         </Text>
+      </View>
 
+      <View style={[styles.avatarPosition, { top: insets.top + 8 }]}>
+        <UserProfileAvatar overCamera />
       </View>
 
       {/* CAMERA CONTROLS */}
 
-      <View style={styles.controls}>
-
-        {/* GALLERY BUTTON */}
-
+      <View
+        style={[
+          styles.controls,
+          { bottom: Math.max(insets.bottom, 8) + 8 },
+        ]}
+      >
         <TouchableOpacity
           style={styles.galleryButton}
           onPress={pickImage}
         >
+          <Text style={styles.galleryIcon}>🖼️</Text>
           <Text style={styles.galleryText}>
-            🖼️ Gallery
+            Gallery
           </Text>
         </TouchableOpacity>
 
-        {/* CAMERA CAPTURE BUTTON */}
-
         <TouchableOpacity
           style={styles.captureButton}
+          accessibilityRole="button"
+          accessibilityLabel="Capture photo"
           onPress={async () => {
 
             if (!camera) {
@@ -927,8 +1109,9 @@ export default function CameraScreen() {
           }}
         >
           <View style={styles.innerButton} />
+          <Text style={styles.captureHint}>Capture</Text>
         </TouchableOpacity>
-
+        <View style={styles.controlSpacer} />
       </View>
 
     </View>
@@ -1015,28 +1198,46 @@ const styles = StyleSheet.create({
 
   cameraOverlay: {
     position: "absolute",
-    top: 60,
-    width: "100%",
-    alignItems: "center",
+    left: 16,
+    right: 72,
+    alignItems: "flex-start",
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: "rgba(12, 35, 25, 0.58)",
   },
 
   cameraTitle: {
-    color: "white",
-    fontSize: 24,
-    fontWeight: "bold",
+    color: "#FFFFFF",
+    fontSize: 18,
+    fontWeight: "700",
+  },
+
+  avatarPosition: {
+    position: "absolute",
+    right: 16,
+    zIndex: 5,
   },
 
   cameraSubtitle: {
-    color: "white",
-    fontSize: 15,
-    marginTop: 5,
+    color: "#E3EEE7",
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 3,
   },
 
   controls: {
     position: "absolute",
-    bottom: 40,
-    width: "100%",
+    left: 12,
+    right: 12,
+    minHeight: 112,
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: "rgba(12, 25, 19, 0.62)",
   },
 
   // =====================================
@@ -1044,19 +1245,25 @@ const styles = StyleSheet.create({
   // =====================================
 
   galleryButton: {
-    position: "absolute",
-    left: 30,
-    bottom: 15,
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    borderRadius: 12,
-    backgroundColor: "white",
+    flex: 1,
+    minHeight: 78,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 14,
+    backgroundColor: "rgba(255, 255, 255, 0.12)",
   },
 
   galleryText: {
-    color: "black",
-    fontSize: 15,
-    fontWeight: "bold",
+    marginTop: 3,
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  galleryIcon: {
+    color: "#FFFFFF",
+    fontSize: 23,
+    lineHeight: 25,
   },
 
   // =====================================
@@ -1064,19 +1271,31 @@ const styles = StyleSheet.create({
   // =====================================
 
   captureButton: {
-    width: 75,
-    height: 75,
-    borderRadius: 40,
-    backgroundColor: "white",
-    justifyContent: "center",
+    flex: 1,
+    minHeight: 84,
     alignItems: "center",
+    justifyContent: "center",
   },
 
   innerButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: "black",
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    borderWidth: 4,
+    borderColor: "#FFFFFF",
+    backgroundColor: "#FFFFFF",
+  },
+
+  captureHint: {
+    marginTop: 4,
+    color: "#FFFFFF",
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: "700",
+  },
+
+  controlSpacer: {
+    flex: 1,
   },
 
   // =====================================
@@ -1102,7 +1321,7 @@ const styles = StyleSheet.create({
 
   previewContainer: {
     flex: 1,
-    backgroundColor: "black",
+    backgroundColor: "#101713",
   },
 
   preview: {
@@ -1111,33 +1330,83 @@ const styles = StyleSheet.create({
     resizeMode: "contain",
   },
 
+  previewHeader: {
+    position: "absolute",
+    top: 18,
+    left: 18,
+    right: 18,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "rgba(12, 35, 25, 0.82)",
+  },
+
+  previewHeaderTitle: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+
+  previewHeaderSubtitle: {
+    marginTop: 4,
+    color: "#E3EEE7",
+    fontSize: 13,
+  },
+
+  analyzingOverlay: {
+    ...StyleSheet.absoluteFill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(10, 25, 18, 0.72)",
+  },
+
+  analyzingTitle: {
+    marginTop: 16,
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "700",
+  },
+
+  analyzingSubtitle: {
+    marginTop: 6,
+    color: "#E3EEE7",
+    fontSize: 14,
+  },
+
   previewControls: {
     position: "absolute",
-    bottom: 35,
-    width: "100%",
+    bottom: 20,
+    left: 16,
+    right: 16,
     flexDirection: "row",
-    justifyContent: "space-evenly",
+    justifyContent: "space-between",
     alignItems: "center",
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: "rgba(12, 35, 25, 0.88)",
   },
 
   retakeButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 25,
+    minHeight: 48,
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 18,
     borderRadius: 12,
-    backgroundColor: "white",
+    backgroundColor: "#FFFFFF",
   },
 
   retakeText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "black",
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#1A1A1A",
   },
 
   analyzeButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 25,
+    minHeight: 48,
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
     borderRadius: 12,
-    backgroundColor: "#111",
+    backgroundColor: "#1B5E3B",
   },
 
   disabledButton: {
@@ -1145,9 +1414,9 @@ const styles = StyleSheet.create({
   },
 
   analyzeText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "white",
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#FFFFFF",
   },
 
   // =====================================
@@ -1156,7 +1425,7 @@ const styles = StyleSheet.create({
 
   resultContainer: {
     flex: 1,
-    backgroundColor: "#f5f5f5",
+    backgroundColor: "#F5F7F5",
   },
 
   resultBackButton: {
@@ -1179,7 +1448,7 @@ const styles = StyleSheet.create({
 
   resultImageContainer: {
     width: "100%",
-    height: "55%",
+    height: "49%",
     position: "relative",
     backgroundColor: "black",
   },
@@ -1217,31 +1486,220 @@ const styles = StyleSheet.create({
 
   resultScrollView: {
     flex: 1,
-    backgroundColor: "#f5f5f5",
+    backgroundColor: "#F5F7F5",
   },
 
   resultScrollContent: {
-    padding: 20,
-    paddingBottom: 40,
-    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 24,
+    alignItems: "stretch",
   },
 
   resultCard: {
     width: "100%",
     alignItems: "center",
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#E2E9E4",
+    borderRadius: 18,
+    backgroundColor: "#FFFFFF",
+  },
+
+  resultSummaryCard: {
+    width: "100%",
+    alignItems: "center",
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "#F2F8F4",
+  },
+
+  resultStatusIcon: {
+    width: 38,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+    borderRadius: 19,
+    backgroundColor: "#FCE8E6",
+  },
+
+  resultStatusIconText: {
+    color: "#A14435",
+    fontSize: 20,
+    fontWeight: "800",
+  },
+
+  noDetectionCard: {
+    backgroundColor: "#EAF5EE",
+  },
+
+  noDetectionIcon: {
+    marginBottom: 7,
+    color: "#1B5E3B",
+    fontSize: 32,
+    fontWeight: "700",
+  },
+
+  reportIssueButton: {
+    width: "100%",
+    minHeight: 50,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+    borderRadius: 12,
+    backgroundColor: "#1B5E3B",
+  },
+
+  reportIssueButtonText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  scanAnotherButton: {
+    width: "100%",
+    minHeight: 48,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#1B5E3B",
+    borderRadius: 12,
+    backgroundColor: "#FFFFFF",
+  },
+
+  scanAnotherButtonText: {
+    color: "#1B5E3B",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  chooseImageButton: {
+    width: "100%",
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    backgroundColor: "#F0F3F1",
+  },
+
+  chooseImageButtonText: {
+    color: "#46534B",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+
+  reportForm: {
+    width: "100%",
+    padding: 16,
+    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+  },
+
+  reportModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    padding: 20,
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+  },
+
+  reportModalScroll: {
+    flexGrow: 0,
+    maxHeight: "90%",
+    width: "100%",
+    alignSelf: "center",
+    maxWidth: 480,
+    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+  },
+
+  reportModalScrollContent: {
+    flexGrow: 1,
+  },
+
+  reportFormImage: {
+    width: "100%",
+    height: 160,
+    marginBottom: 12,
+    borderRadius: 10,
+    backgroundColor: "#E8E9EB",
+    resizeMode: "cover",
+  },
+
+  reportFormSummary: {
+    color: "#1A1A1A",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+
+  reportFormLocation: {
+    marginTop: 6,
+    marginBottom: 14,
+    color: "#555",
+    fontSize: 14,
+  },
+
+  reportFormLabel: {
+    marginBottom: 7,
+    color: "#1A1A1A",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+
+  reportDescriptionInput: {
+    minHeight: 100,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+    borderRadius: 10,
+    color: "#1A1A1A",
+    fontSize: 14,
+  },
+
+  submitReportButton: {
+    minHeight: 48,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 14,
+    borderRadius: 10,
+    backgroundColor: "#1B5E3B",
+  },
+
+  submitReportButtonDisabled: {
+    opacity: 0.65,
+  },
+
+  submitReportButtonText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  cancelReportButton: {
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 4,
+  },
+
+  cancelReportButtonText: {
+    color: "#6B7280",
+    fontSize: 14,
+    fontWeight: "600",
   },
 
   resultTitle: {
-    fontSize: 25,
-    fontWeight: "bold",
+    fontSize: 21,
+    fontWeight: "700",
     textAlign: "center",
-    marginBottom: 10,
+    marginBottom: 7,
   },
 
   resultCount: {
-    fontSize: 17,
-    color: "#555",
-    marginBottom: 20,
+    fontSize: 15,
+    color: "#46534B",
+    marginBottom: 10,
   },
 
   infoBox: {
@@ -1265,10 +1723,11 @@ const styles = StyleSheet.create({
   },
 
   infoText: {
-    fontSize: 16,
+    fontSize: 14,
+    lineHeight: 20,
     textAlign: "center",
-    color: "#555",
-    marginBottom: 25,
+    color: "#5A655E",
+    marginBottom: 10,
   },
 
   reportSaveMessage: {
@@ -1288,29 +1747,29 @@ const styles = StyleSheet.create({
 
   locationCard: {
     width: "100%",
-    backgroundColor: "white",
+    backgroundColor: "#FFFFFF",
     borderRadius: 14,
-    padding: 16,
-    marginTop: 5,
-    marginBottom: 20,
+    padding: 14,
+    marginTop: 8,
+    marginBottom: 14,
   },
 
   locationTitle: {
-    fontSize: 17,
-    fontWeight: "bold",
-    color: "#111",
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#1A1A1A",
   },
 
   locationText: {
-    fontSize: 14,
-    color: "#555",
+    fontSize: 13,
+    color: "#5A655E",
     marginTop: 6,
   },
 
   resultButtons: {
     width: "100%",
     alignItems: "center",
-    marginTop: 5,
+    marginTop: 14,
   },
 
   scanAgainButton: {

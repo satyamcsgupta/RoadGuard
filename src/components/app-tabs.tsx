@@ -1,10 +1,6 @@
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
-import { useAuthSession } from '@/hooks/use-auth-session';
 
 export default function AppTabs() {
-  const { user, isLoading } = useAuthSession();
-  const isAuthenticated = isLoading || Boolean(user);
-
   return (
     <NativeTabs
       backgroundColor="#FFFFFF"
@@ -42,18 +38,8 @@ export default function AppTabs() {
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="explore">
-        <NativeTabs.Trigger.Label>Explore</NativeTabs.Trigger.Label>
-        <NativeTabs.Trigger.Icon
-          sf={{ default: 'safari', selected: 'safari.fill' }}
-          md={{ default: 'explore', selected: 'explore' }}
-        />
-      </NativeTabs.Trigger>
-
-      <NativeTabs.Trigger name={isAuthenticated ? "profile" : "login"}>
-        <NativeTabs.Trigger.Label>
-          {isAuthenticated ? "Profile" : "Login"}
-        </NativeTabs.Trigger.Label>
+      <NativeTabs.Trigger name="profile">
+        <NativeTabs.Trigger.Label>Profile</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
           sf={{ default: 'person.crop.circle', selected: 'person.crop.circle.fill' }}
           md={{ default: 'person', selected: 'person' }}

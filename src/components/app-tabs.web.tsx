@@ -10,46 +10,32 @@ import type { Href } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useAuthSession } from '@/hooks/use-auth-session';
 
 const tabIcons = {
   home: { ios: 'house.fill', android: 'home', web: 'home' },
   scan: { ios: 'camera.fill', android: 'camera_alt', web: 'camera_alt' },
   reports: { ios: 'doc.text.fill', android: 'description', web: 'description' },
-  explore: { ios: 'safari.fill', android: 'explore', web: 'explore' },
   login: { ios: 'person.crop.circle', android: 'person', web: 'person' },
   profile: { ios: 'person.crop.circle', android: 'person', web: 'person' },
 } as const;
 
 export default function AppTabs() {
-  const { user, isLoading } = useAuthSession();
-  const isAuthenticated = isLoading || Boolean(user);
-
   return (
     <Tabs options={{ initialRouteName: 'index' }}>
       <TabSlot style={{ height: '100%', paddingBottom: 76 }} />
       <TabList asChild>
         <CustomTabList>
-          <TabTrigger name="home" href={'/' as Href} asChild>
+          <TabTrigger name="home" href={'/(app)/(tabs)/index' as Href} asChild>
             <TabButton icon="home">Home</TabButton>
           </TabTrigger>
-          <TabTrigger name="camera" href="/camera" asChild>
+          <TabTrigger name="camera" href={'/(app)/(tabs)/camera' as Href} asChild>
             <TabButton icon="scan">Scan</TabButton>
           </TabTrigger>
-          <TabTrigger name="reports" href="/reports" asChild>
+          <TabTrigger name="reports" href={'/(app)/(tabs)/reports' as Href} asChild>
             <TabButton icon="reports">Reports</TabButton>
           </TabTrigger>
-          <TabTrigger name="explore" href="/explore" asChild>
-            <TabButton icon="explore">Explore</TabButton>
-          </TabTrigger>
-          <TabTrigger
-            name={isAuthenticated ? "profile" : "login"}
-            href={isAuthenticated ? "/profile" : "/login"}
-            asChild
-          >
-            <TabButton icon={isAuthenticated ? "profile" : "login"}>
-              {isAuthenticated ? "Profile" : "Login"}
-            </TabButton>
+          <TabTrigger name="profile" href={'/(app)/(tabs)/profile' as Href} asChild>
+            <TabButton icon="profile">Profile</TabButton>
           </TabTrigger>
         </CustomTabList>
       </TabList>
