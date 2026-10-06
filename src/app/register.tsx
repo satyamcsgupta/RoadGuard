@@ -13,7 +13,6 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { API_ENDPOINTS, readJsonResponse } from "@/lib/api";
-import { useAuthSession } from "@/hooks/use-auth-session";
 
 type RegisterResponse = {
   message: string;

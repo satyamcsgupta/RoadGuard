@@ -59,14 +59,12 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     let isActive = true;
-    if (!user) {
-      setProfileImageUri(null);
-      return () => {
-        isActive = false;
-      };
-    }
 
     const loadProfilePicture = async () => {
+      if (!user) {
+        if (isActive) setProfileImageUri(null);
+        return;
+      }
       try {
         const savedUri = await SecureStore.getItemAsync(profilePictureKey(user.id));
         if (!isActive) return;

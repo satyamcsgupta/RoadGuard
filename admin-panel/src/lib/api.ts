@@ -1,9 +1,7 @@
 import { readAdminSession } from '../auth/session'
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
-const defaultApiBaseUrl = import.meta.env.PROD
-  ? 'https://roadguard-api-zs99.onrender.com'
-  : 'http://10.132.211.118:8000'
+const defaultApiBaseUrl = 'https://roadguard-api-zs99.onrender.com'
 
 export const API_BASE_URL = (
   configuredApiBaseUrl || defaultApiBaseUrl

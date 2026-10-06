@@ -1,6 +1,5 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useRef } from 'react';
 import { ActivityIndicator, StyleSheet, useColorScheme, View } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
@@ -12,11 +11,7 @@ function AppNavigator() {
   const colorScheme = useColorScheme();
   const { user, isLoading } = useAuthSession();
   const isAuthenticated = Boolean(user);
-  const initialRouteName = useRef<'(app)' | 'welcome' | null>(null);
-
-  if (!isLoading && initialRouteName.current === null) {
-    initialRouteName.current = isAuthenticated ? '(app)' : 'welcome';
-  }
+  const initialRouteName = isAuthenticated ? '(app)' : 'welcome';
 
   if (isLoading) {
     return (
@@ -29,7 +24,7 @@ function AppNavigator() {
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <AnimatedSplashOverlay />
-      <Stack initialRouteName={initialRouteName.current ?? 'welcome'} screenOptions={{ headerShown: false }}>
+      <Stack initialRouteName={initialRouteName} screenOptions={{ headerShown: false }}>
         <Stack.Screen name="+not-found" options={{ headerShown: false }} />
         <Stack.Screen name="(app)" options={{ headerShown: false }} />
         <Stack.Screen name="welcome" options={{ headerShown: false }} />

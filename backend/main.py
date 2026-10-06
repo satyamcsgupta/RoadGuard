@@ -242,8 +242,15 @@ class AdminReportStatusUpdate(BaseModel):
 MODEL_PATH = (
     Path(__file__).resolve().parent
     / "models"
-    / "best.pt"
+    / "best.onnx"
 )
+
+if not MODEL_PATH.is_file():
+    MODEL_PATH = (
+        Path(__file__).resolve().parent
+        / "models"
+        / "best.pt"
+    )
 
 # IMPORTANT:
 # Do NOT load YOLO when main.py is imported.
@@ -256,9 +263,9 @@ def get_model():
     global model
 
     if model is None:
-        logger.info("Loading YOLO model...")
+        logger.info("Loading YOLO model from %s...", MODEL_PATH.name)
 
-        model = YOLO(str(MODEL_PATH))
+        model = YOLO(str(MODEL_PATH), task="detect")
 
         logger.info("YOLO model loaded successfully.")
 

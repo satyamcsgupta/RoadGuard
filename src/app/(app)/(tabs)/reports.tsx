@@ -314,7 +314,7 @@ export default function ReportsScreen() {
           </View>
           <Text style={styles.title}>My Reports</Text>
           <Text style={styles.subtitle}>
-            Track the road issues you've reported.
+            {"Track the road issues you've reported."}
           </Text>
         </View>
 
