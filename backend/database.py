@@ -4,15 +4,12 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from config import load_backend_env
+
+load_backend_env()
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "roadguard.db"
-env_path = BASE_DIR / ".env"
-if env_path.is_file():
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip():
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL or not DATABASE_URL.strip():

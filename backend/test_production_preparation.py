@@ -139,7 +139,11 @@ class BackendPreparationTests(unittest.TestCase):
             analysis_temp_paths.append(Path(source))
             return [SimpleNamespace(boxes=None)]
 
-        with patch.object(main.model, "predict", side_effect=fake_predict):
+        with patch.object(
+            main,
+            "get_model",
+            return_value=SimpleNamespace(predict=fake_predict),
+        ):
             analysis_responses = [
                 self.client.post(
                     "/analyze",
@@ -359,7 +363,7 @@ class BackendPreparationTests(unittest.TestCase):
                 SUPABASE_SERVICE_ROLE_KEY=service_role_key,
                 SUPABASE_STORAGE_BUCKET="roadguard-reports",
             ), patch.object(storage.httpx, "post") as post_request, patch.object(
-                storage.httpx, "delete"
+                storage.httpx, "request"
             ) as delete_request:
                 response = Mock(is_success=True, status_code=200)
                 response.json.return_value = {"signedURL": signed_path}
@@ -381,9 +385,40 @@ class BackendPreparationTests(unittest.TestCase):
                 )
                 storage.delete_report_image(storage_key)
                 self.assertEqual(
+                    delete_request.call_args.args[0],
+                    "DELETE",
+                )
+                self.assertEqual(
                     delete_request.call_args.kwargs["json"],
                     {"prefixes": [storage_key]},
                 )
+
+    def test_supabase_upload_error_includes_safe_response_details(self):
+        service_role_key = "test-only-service-role-key"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source_path = Path(temporary_directory) / "upload.jpg"
+            source_path.write_bytes(image_bytes())
+            with patch.multiple(
+                storage,
+                STORAGE_BACKEND="supabase",
+                SUPABASE_URL="https://storage.example.test",
+                SUPABASE_SERVICE_ROLE_KEY=service_role_key,
+                SUPABASE_STORAGE_BUCKET="roadguard-reports",
+            ), patch.object(storage.httpx, "post") as post_request:
+                response = Mock(is_success=False, status_code=400)
+                response.text = f"Rejected key {service_role_key}: bucket missing"
+                post_request.return_value = response
+
+                with self.assertRaises(storage.StorageError) as raised:
+                    storage.upload_report_image(
+                        source_path,
+                        "upload.jpg",
+                        "image/jpeg",
+                    )
+
+                self.assertIn("HTTP 400", str(raised.exception))
+                self.assertIn("bucket missing", str(raised.exception))
+                self.assertNotIn(service_role_key, str(raised.exception))
 
 
 if __name__ == "__main__":
