@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { API_ENDPOINTS, authorizationHeader } from "@/lib/api";
+import { clearReportDataCache } from "@/lib/report-data-version";
 
 export type UserProfile = {
   id: number;
@@ -114,11 +115,15 @@ export function AuthSessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setAuthenticatedUser = useCallback(
-    (nextUser: UserProfile) => setUser(nextUser),
+    (nextUser: UserProfile) => {
+      clearReportDataCache();
+      setUser(nextUser);
+    },
     [],
   );
 
   const clearSession = useCallback(async () => {
+    clearReportDataCache();
     setUser(null);
     const results = await Promise.allSettled([
       SecureStore.deleteItemAsync("roadguard_access_token"),

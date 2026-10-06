@@ -1,8 +1,9 @@
-const configuredApiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+const defaultApiBaseUrl =
+  process.env.NODE_ENV === "production"
+    ? "https://roadguard-api-zs99.onrender.com"
+    : "http://10.132.211.118:8000";
 
-export const API_BASE_URL = (
-  configuredApiBaseUrl || "http://10.132.211.118:8000"
-).replace(/\/+$/, "");
+export const API_BASE_URL = defaultApiBaseUrl.replace(/\/+$/, "");
 
 export const API_ENDPOINTS = {
   login: `${API_BASE_URL}/login`,

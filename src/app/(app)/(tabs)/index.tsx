@@ -22,17 +22,15 @@ import {
   authorizationHeader,
   readJsonResponse,
 } from "@/lib/api";
-
-type Report = {
-  id: number;
-  image_filename: string;
-  latitude: number;
-  longitude: number;
-  pothole_count: number;
-  status: string;
-  admin_note: string | null;
-  created_at: string;
-};
+import {
+  getCachedReportImages,
+  getCachedReports,
+  getCachedReportsVersion,
+  getReportDataVersion,
+  setCachedReportImages,
+  setCachedReports,
+  type CachedReport as Report,
+} from "@/lib/report-data-version";
 
 type ReportsState = "loading" | "loaded" | "error";
 
@@ -45,13 +43,21 @@ function getGreeting() {
 
 export default function HomeScreen() {
   const { user, clearSession } = useAuthSession();
-  const [reports, setReports] = useState<Report[]>([]);
-  const [reportImages, setReportImages] = useState<Record<number, string>>({});
-  const [reportsState, setReportsState] = useState<ReportsState>("loading");
+  const [reports, setReports] = useState<Report[]>(() => getCachedReports() ?? []);
+  const [reportImages, setReportImages] =
+    useState<Record<number, string>>(() => getCachedReportImages());
+  const [reportsState, setReportsState] = useState<ReportsState>(
+    () => (getCachedReports() ? "loaded" : "loading")
+  );
   const [reportsError, setReportsError] = useState<string | null>(null);
 
-  const loadReports = useCallback(async (isActive: () => boolean = () => true) => {
-    setReportsState("loading");
+  const loadReports = useCallback(async (
+    isActive: () => boolean = () => true,
+    version = getReportDataVersion(),
+    showLoading = getCachedReports() === null,
+    forceFetch = false
+  ) => {
+    if (showLoading) setReportsState("loading");
     setReportsError(null);
 
     try {
@@ -66,27 +72,39 @@ export default function HomeScreen() {
         return;
       }
 
-      const response = await fetch(API_ENDPOINTS.reports, {
-        headers: authorizationHeader(token),
-      });
-      if (response.status === 401 || response.status === 403) {
-        await clearSession();
-        return;
-      }
-      const data = await readJsonResponse<unknown>(response);
-      if (!Array.isArray(data)) {
-        throw new Error("Unexpected reports response");
-      }
+      let userReports = getCachedReports();
+      if (
+        forceFetch ||
+        userReports === null ||
+        getCachedReportsVersion() !== version
+      ) {
+        const response = await fetch(API_ENDPOINTS.reports, {
+          headers: authorizationHeader(token),
+        });
+        if (response.status === 401 || response.status === 403) {
+          await clearSession();
+          return;
+        }
+        const data = await readJsonResponse<unknown>(response);
+        if (!Array.isArray(data)) {
+          throw new Error("Unexpected reports response");
+        }
 
-      const userReports = data as Report[];
+        userReports = data as Report[];
+        setCachedReports(userReports, version);
+      }
+      if (!userReports) return;
       if (!isActive()) return;
       setReports(userReports);
-      setReportImages({});
+      setReportImages(getCachedReportImages());
       setReportsState("loaded");
 
       const recentReports = userReports.slice(0, 3);
       const cachedImages = await Promise.all(
         recentReports.map(async (report) => {
+          const cachedImage = getCachedReportImages()[report.id];
+          if (cachedImage) return [report.id, cachedImage] as const;
+
           try {
             const imageResponse = await fetch(
               `${API_ENDPOINTS.reports}/${report.id}/image`,
@@ -120,13 +138,13 @@ export default function HomeScreen() {
       );
 
       if (isActive()) {
-        setReportImages(
-          Object.fromEntries(
-            cachedImages.filter(
-              (entry): entry is readonly [number, string] => entry !== null
-            )
+        const images = Object.fromEntries(
+          cachedImages.filter(
+            (entry): entry is readonly [number, string] => entry !== null
           )
         );
+        setCachedReportImages(images);
+        setReportImages(getCachedReportImages());
       }
     } catch (error) {
       if (!isActive()) return;
@@ -139,8 +157,24 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      const version = getReportDataVersion();
+      const cachedReports = getCachedReports();
+      if (cachedReports) {
+        setReports(cachedReports);
+        setReportImages(getCachedReportImages());
+        setReportsState("loaded");
+        setReportsError(null);
+      }
+      if (
+        cachedReports &&
+        getCachedReportsVersion() === version &&
+        cachedReports.slice(0, 3).every((report) => getCachedReportImages()[report.id])
+      ) {
+        return;
+      }
+
       let isActive = true;
-      void loadReports(() => isActive);
+      void loadReports(() => isActive, version, cachedReports === null);
       return () => {
         isActive = false;
       };
@@ -160,7 +194,9 @@ export default function HomeScreen() {
         refreshControl={
           <RefreshControl
             refreshing={reportsState === "loading"}
-            onRefresh={() => void loadReports()}
+            onRefresh={() =>
+              void loadReports(() => true, getReportDataVersion(), true, true)
+            }
             tintColor="#1B5E3B"
             colors={["#1B5E3B"]}
           />
@@ -265,7 +301,9 @@ export default function HomeScreen() {
               </Text>
               <Pressable
                 accessibilityRole="button"
-                onPress={() => void loadReports()}
+                onPress={() =>
+                  void loadReports(() => true, getReportDataVersion(), true, true)
+                }
                 style={styles.retryButton}
               >
                 <Text style={styles.retryText}>Retry</Text>

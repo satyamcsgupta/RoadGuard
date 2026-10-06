@@ -23,6 +23,12 @@ import {
   authorizationHeader,
   readJsonResponse,
 } from "@/lib/api";
+import {
+  getCachedActivity,
+  getCachedActivityVersion,
+  getReportDataVersion,
+  setCachedActivity,
+} from "@/lib/report-data-version";
 
 type ReportSummary = {
   pothole_count: number;
@@ -39,10 +45,16 @@ export default function ProfileScreen() {
   const [isPictureActionsVisible, setIsPictureActionsVisible] = useState(false);
   const [isSavingPicture, setIsSavingPicture] = useState(false);
   const [pictureError, setPictureError] = useState<string | null>(null);
-  const [reportCount, setReportCount] = useState(0);
-  const [potholeCount, setPotholeCount] = useState(0);
+  const [reportCount, setReportCount] = useState(
+    () => getCachedActivity()?.reportCount ?? 0
+  );
+  const [potholeCount, setPotholeCount] = useState(
+    () => getCachedActivity()?.potholeCount ?? 0
+  );
   const [activityState, setActivityState] =
-    useState<ActivityState>("loading");
+    useState<ActivityState>(() =>
+      getCachedActivity() ? "loaded" : "loading"
+    );
   const [activityError, setActivityError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -82,8 +94,11 @@ export default function ProfileScreen() {
     };
   }, [user]);
 
-  const loadActivity = useCallback(async () => {
-    setActivityState("loading");
+  const loadActivity = useCallback(async (
+    version = getReportDataVersion(),
+    showLoading = getCachedActivity() === null
+  ) => {
+    if (showLoading) setActivityState("loading");
     setActivityError(null);
     try {
       const token = await SecureStore.getItemAsync("roadguard_access_token");
@@ -117,10 +132,16 @@ export default function ProfileScreen() {
         throw new Error("Unexpected reports response");
       }
 
-      setReportCount(data.length);
-      setPotholeCount(
-        data.reduce((total, report) => total + report.pothole_count, 0)
-      );
+      const activity = {
+        reportCount: data.length,
+        potholeCount: data.reduce(
+          (total, report) => total + report.pothole_count,
+          0
+        ),
+      };
+      setReportCount(activity.reportCount);
+      setPotholeCount(activity.potholeCount);
+      setCachedActivity(activity, version);
       setActivityState("loaded");
     } catch (error) {
       setActivityError(
@@ -132,7 +153,16 @@ export default function ProfileScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (user) void loadActivity();
+      const version = getReportDataVersion();
+      const cachedActivity = getCachedActivity();
+      if (cachedActivity) {
+        setReportCount(cachedActivity.reportCount);
+        setPotholeCount(cachedActivity.potholeCount);
+        setActivityState("loaded");
+      }
+      if (!user || (cachedActivity && getCachedActivityVersion() === version)) return;
+
+      void loadActivity(version, cachedActivity === null);
     }, [loadActivity, user])
   );
 
@@ -389,7 +419,9 @@ export default function ProfileScreen() {
               </Text>
               <Pressable
                 accessibilityRole="button"
-                onPress={() => void loadActivity()}
+                onPress={() =>
+                  void loadActivity(getReportDataVersion(), true)
+                }
                 style={styles.activityRetryButton}
               >
                 <Text style={styles.activityRetryText}>Try Again</Text>

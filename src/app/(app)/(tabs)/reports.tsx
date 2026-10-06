@@ -10,6 +10,15 @@ import {
   authorizationHeader,
   readJsonResponse,
 } from "@/lib/api";
+import {
+  getCachedReportImages,
+  getCachedReports,
+  getCachedReportsVersion,
+  getReportDataVersion,
+  setCachedReportImages,
+  setCachedReports,
+  type CachedReport as Report,
+} from "@/lib/report-data-version";
 import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
@@ -24,41 +33,30 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuthSession } from "@/hooks/use-auth-session";
 
-type Report = {
-  id: number;
-  image_filename: string;
-  latitude: number;
-  longitude: number;
-  pothole_count: number;
-  status: string;
-  admin_note: string | null;
-  created_at: string;
-};
-
 export default function ReportsScreen() {
   const { clearSession } = useAuthSession();
-  const [reports, setReports] = useState<Report[]>([]);
-  const [reportImages, setReportImages] = useState<Record<number, string>>({});
-  const [isLoading, setIsLoading] = useState(true);
+  const [reports, setReports] = useState<Report[]>(() => getCachedReports() ?? []);
+  const [reportImages, setReportImages] =
+    useState<Record<number, string>>(() => getCachedReportImages());
+  const [isLoading, setIsLoading] = useState(() => getCachedReports() === null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadReports = useCallback(async (refresh = false) => {
+  const loadReports = useCallback(async (
+    refresh = false,
+    version = getReportDataVersion(),
+    showLoading = getCachedReports() === null,
+    forceFetch = refresh
+  ) => {
     if (refresh) {
       setIsRefreshing(true);
-    } else {
+    } else if (showLoading) {
       setIsLoading(true);
     }
     setError(null);
 
     try {
       const token = await SecureStore.getItemAsync("roadguard_access_token");
-      console.log(
-        "REPORTS JWT exists:",
-        Boolean(token),
-        "length:",
-        token?.length ?? 0
-      );
       if (!token) {
         await clearSession();
         setReports([]);
@@ -66,30 +64,37 @@ export default function ReportsScreen() {
         return;
       }
 
-      const authorization = `Bearer ${token}`;
-      console.log(
-        "REPORTS Authorization header present:",
-        Boolean(authorization)
-      );
-      const response = await fetch(API_ENDPOINTS.reports, {
-        headers: authorizationHeader(token),
-      });
-      if (response.status === 401 || response.status === 403) {
-        await clearSession();
-        return;
+      let userReports = getCachedReports();
+      if (
+        forceFetch ||
+        userReports === null ||
+        getCachedReportsVersion() !== version
+      ) {
+        const response = await fetch(API_ENDPOINTS.reports, {
+          headers: authorizationHeader(token),
+        });
+        if (response.status === 401 || response.status === 403) {
+          await clearSession();
+          return;
+        }
+        const data = await readJsonResponse<unknown>(response);
+        if (!Array.isArray(data)) {
+          throw new Error("Unexpected reports response");
+        }
+
+        userReports = data as Report[];
+        setCachedReports(userReports, version);
       }
-      const data = await readJsonResponse<unknown>(response);
-      if (!Array.isArray(data)) {
-        throw new Error("Unexpected reports response");
-      }
-      const userReports = data as Report[];
+      if (!userReports) return;
       setReports(userReports);
-      setReportImages({});
+      setReportImages(getCachedReportImages());
       setIsLoading(false);
-      setIsRefreshing(false);
 
       const imageEntries = await Promise.all(
         userReports.map(async (report) => {
+          const cachedImage = getCachedReportImages()[report.id];
+          if (cachedImage) return [report.id, cachedImage] as const;
+
           try {
             const imageResponse = await fetch(
               `${API_ENDPOINTS.reports}/${report.id}/image`,
@@ -125,13 +130,14 @@ export default function ReportsScreen() {
           }
         })
       );
-      setReportImages(
+      setCachedReportImages(
         Object.fromEntries(
           imageEntries.filter(
             (entry): entry is readonly [number, string] => entry !== null
           )
         )
       );
+      setReportImages(getCachedReportImages());
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : "Reports request failed";
@@ -145,7 +151,23 @@ export default function ReportsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadReports();
+      const version = getReportDataVersion();
+      const cachedReports = getCachedReports();
+      if (cachedReports) {
+        setReports(cachedReports);
+        setReportImages(getCachedReportImages());
+        setIsLoading(false);
+        setError(null);
+      }
+      if (
+        cachedReports &&
+        getCachedReportsVersion() === version &&
+        cachedReports.every((report) => getCachedReportImages()[report.id])
+      ) {
+        return;
+      }
+
+      void loadReports(false, version, cachedReports === null);
     }, [loadReports])
   );
 
@@ -270,7 +292,9 @@ export default function ReportsScreen() {
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}
-            onRefresh={() => void loadReports(true)}
+            onRefresh={() =>
+              void loadReports(true, getReportDataVersion(), true)
+            }
             tintColor="#1B5E3B"
             colors={["#1B5E3B"]}
           />
@@ -366,7 +390,9 @@ export default function ReportsScreen() {
             <Text style={styles.stateText}>{error}</Text>
             <Pressable
               accessibilityRole="button"
-              onPress={() => void loadReports()}
+              onPress={() =>
+                void loadReports(false, getReportDataVersion(), true, true)
+              }
               style={styles.actionButton}
             >
             <Text style={styles.actionButtonText}>Try Again</Text>

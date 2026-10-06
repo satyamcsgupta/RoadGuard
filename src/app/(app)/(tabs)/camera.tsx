@@ -10,6 +10,7 @@ import {
   authorizationHeader,
   readJsonResponse,
 } from "@/lib/api";
+import { invalidateReportData } from "@/lib/report-data-version";
 import { UserProfileAvatar } from "@/components/user-profile-avatar";
 import { useAuthSession } from "@/hooks/use-auth-session";
 import { useEffect, useRef, useState } from "react";
@@ -212,6 +213,7 @@ export default function CameraScreen() {
       }
       await readJsonResponse<unknown>(reportResponse);
 
+      invalidateReportData();
       setReportSaveStatus("saved");
       setReportDraft(null);
     } catch (reportError) {

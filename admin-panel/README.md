@@ -1,5 +1,14 @@
 # React + TypeScript + Vite
 
+## RoadGuard API configuration
+
+The admin panel uses `http://10.132.211.118:8000` during development and
+`https://roadguard-api-zs99.onrender.com` in production. Set `VITE_API_BASE_URL`
+to override either default; Vite embeds this value at build time, so configure
+it in the Render static site's environment when using a different backend.
+Configure the backend's `CORS_ORIGINS` with the exact deployed admin-panel
+origin so browser requests are accepted.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

@@ -8,6 +8,7 @@ import {
 } from "@/lib/api";
 import { getReportStatusPresentation } from "@/lib/report-status";
 import { formatApiDateTime } from "@/lib/date-time";
+import { invalidateReportData } from "@/lib/report-data-version";
 import { useAuthSession } from "@/hooks/use-auth-session";
 import { useCallback, useState } from "react";
 import {
@@ -202,6 +203,7 @@ export default function ReportDetailsScreen() {
       }
       await readJsonResponse<unknown>(response);
 
+      invalidateReportData();
       router.replace("/(app)/(tabs)/reports");
     } catch (requestError) {
       setDeleteError(
