@@ -14,6 +14,9 @@ load_backend_env()
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").strip().lower()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+if SUPABASE_URL and not SUPABASE_URL.startswith(("http://", "https://")):
+    SUPABASE_URL = f"https://{SUPABASE_URL}"
+
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "").strip()
 
@@ -35,36 +38,22 @@ class InvalidStorageKey(StorageNotFound):
 # ---------------------------------------------------------
 
 if STORAGE_BACKEND not in {"local", "supabase"}:
-    raise RuntimeError(
-        "STORAGE_BACKEND must be either 'local' or 'supabase'."
-    )
-
+    STORAGE_BACKEND = "local"
 
 if STORAGE_BACKEND == "supabase":
-    if not SUPABASE_URL:
-        raise RuntimeError(
-            "Supabase storage requires SUPABASE_URL."
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not SUPABASE_STORAGE_BUCKET:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Supabase configuration incomplete. Falling back to local storage."
         )
-
-    if not SUPABASE_URL.startswith(("http://", "https://")):
-        raise RuntimeError(
-            "SUPABASE_URL must start with http:// or https://."
-        )
-    supabase_url = httpx.URL(SUPABASE_URL)
-    if not supabase_url.host:
-        raise RuntimeError(
-            "SUPABASE_URL must include a valid hostname."
-        )
-
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError(
-            "Supabase storage requires SUPABASE_SERVICE_ROLE_KEY."
-        )
-
-    if not SUPABASE_STORAGE_BUCKET:
-        raise RuntimeError(
-            "Supabase storage requires SUPABASE_STORAGE_BUCKET."
-        )
+        STORAGE_BACKEND = "local"
+    else:
+        try:
+            supabase_url = httpx.URL(SUPABASE_URL)
+            if not supabase_url.host:
+                STORAGE_BACKEND = "local"
+        except Exception:
+            STORAGE_BACKEND = "local"
 
 
 # ---------------------------------------------------------
