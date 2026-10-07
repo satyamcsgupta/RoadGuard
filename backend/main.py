@@ -1291,7 +1291,7 @@ def delete_report(
 # ==============================
 
 @app.post("/analyze")
-async def analyze_image(
+def analyze_image(
     file: UploadFile = File(...),
     latitude: float | None = Form(None),
     longitude: float | None = Form(None),
@@ -1355,11 +1355,18 @@ async def analyze_image(
         # Load YOLO only when needed
         # ------------------------------
 
-        results = get_model().predict(
-            source=str(temp_path),
-            conf=0.10,
-            imgsz=640,
-        )
+        try:
+            results = get_model().predict(
+                source=str(temp_path),
+                conf=0.10,
+                imgsz=640,
+            )
+        except Exception as error:
+            logger.exception("Inference failed: %s", error)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Image analysis failed: {error}",
+            ) from error
 
         result = results[0]
 
