@@ -1,5 +1,5 @@
 const configuredApiBaseUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
-const defaultApiBaseUrl = "https://roadguard-api-zs99.onrender.com";
+const defaultApiBaseUrl = "https://roadguard-tj8u.onrender.com";
 
 export const API_BASE_URL = (
   configuredApiBaseUrl || defaultApiBaseUrl
