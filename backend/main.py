@@ -44,15 +44,6 @@ app = FastAPI()
 # CORS
 # ==============================
 
-DEFAULT_CORS_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",
-    "http://localhost:19006",
-    "http://127.0.0.1:19006",
-]
-
 configured_cors_origins = os.getenv("CORS_ORIGINS")
 
 cors_origins = (
@@ -62,13 +53,8 @@ cors_origins = (
         if origin.strip()
     ]
     if configured_cors_origins is not None
-    else DEFAULT_CORS_ORIGINS
+    else ["*"]
 )
-
-if "*" in cors_origins:
-    raise RuntimeError(
-        "CORS_ORIGINS must list explicit origins; wildcard origins are not allowed."
-    )
 
 app.add_middleware(
     CORSMiddleware,

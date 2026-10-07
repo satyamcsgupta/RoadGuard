@@ -389,7 +389,7 @@ export default function CameraScreen() {
         await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ["images"],
           allowsEditing: false,
-          quality: 1,
+          quality: 0.7,
           exif: true,
         });
 
@@ -1084,7 +1084,7 @@ export default function CameraScreen() {
               );
 
               const photo =
-                await camera.takePictureAsync();
+                await camera.takePictureAsync({ quality: 0.7 });
 
               if (photo?.uri) {
 
